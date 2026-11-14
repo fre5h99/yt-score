@@ -511,7 +511,8 @@ $('pdfBtn').onclick = async () => {
       y += h + gap;
       first = false;
     }
-    doc.save(`${source?.name || 'score'}.pdf`);
+    const name = $('pdfName').value.trim().replace(/\.pdf$/i, '').replace(/[\\/:*?"<>|]/g, '_');
+    doc.save(`${name || source?.name || 'score'}.pdf`);
     busy(false, `${chosen.length}줄 PDF 저장 완료`);
   } catch (e) { fail(e); }
 };

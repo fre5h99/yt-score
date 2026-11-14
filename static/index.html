@@ -52,6 +52,7 @@
   <div class="row">
     <label><input id="mask" type="checkbox" checked> 배경 제거</label>
     <button id="extractBtn">추출</button>
+    <input id="pdfName" type="text" placeholder="파일 이름" style="flex:0 1 200px">
     <button id="pdfBtn" disabled>PDF 저장</button>
   </div>
 </section>
@@ -224,7 +225,9 @@ $('mergeBtn').onclick = () => {
 
 $('edClose').onclick = () => { sel = -1; $('editor').classList.add('hidden'); renderCards(); };
 
-// 6. PDF 저장
+// 6. PDF 저장 (입력한 이름, 비었으면 기본값. 파일명에 못 쓰는 문자는 _ 로)
+const pdfName = fallback =>
+  ($('pdfName').value.trim().replace(/\.pdf$/i, '').replace(/[\\/:*?"<>|]/g, '_') || fallback) + '.pdf';
 $('pdfBtn').onclick = async () => {
   const chosen = lines.filter(l => l.include).map(({ start, end }) => ({ start, end }));
   if (!chosen.length) return alert('체크된 줄이 없습니다');
@@ -233,7 +236,7 @@ $('pdfBtn').onclick = async () => {
     const blob = await (await api('/api/pdf', { id: video.id, ...region, mask: $('mask').checked, lines: chosen })).blob();
     const a = document.createElement('a');
     a.href = URL.createObjectURL(blob);
-    a.download = `${video.id}.pdf`;
+    a.download = pdfName(video.id);
     a.click();
     busy(false, `${chosen.length}줄 PDF 저장 완료`);
   } catch (e) { busy(false); $('err').textContent = e.message; }
