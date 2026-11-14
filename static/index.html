@@ -1,0 +1,243 @@
+<!doctype html>
+<html lang="ko">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>유튜브 악보 추출</title>
+<style>
+  body { font-family: -apple-system, sans-serif; margin: 0 auto; max-width: 1100px; padding: 16px; background: #f4f4f5; color: #222; }
+  h1 { font-size: 20px; }
+  section { background: #fff; border-radius: 8px; padding: 12px; margin-bottom: 12px; }
+  .row { display: flex; gap: 8px; align-items: center; flex-wrap: wrap; }
+  input[type=text] { flex: 1; padding: 8px; font-size: 14px; }
+  button { padding: 8px 14px; cursor: pointer; }
+  .hidden { display: none !important; }
+  .err { color: #c00; white-space: pre-wrap; font-size: 13px; }
+  .spinner { width: 16px; height: 16px; border: 3px solid #ccc; border-top-color: #333; border-radius: 50%; animation: spin 1s linear infinite; }
+  @keyframes spin { to { transform: rotate(360deg); } }
+  #stage { position: relative; user-select: none; margin: 8px 0; }
+  #stage img { width: 100%; display: block; }
+  #box { position: absolute; left: 0; right: 0; background: rgba(0, 120, 255, .18); outline: 2px solid #08f; }
+  .handle { position: absolute; left: 0; right: 0; height: 12px; cursor: ns-resize; background: rgba(0, 120, 255, .6); }
+  .handle.top { top: -6px; } .handle.bottom { bottom: -6px; }
+  #cards { display: grid; gap: 8px; }
+  .card { display: flex; gap: 8px; align-items: center; border: 1px solid #ddd; border-radius: 6px; padding: 6px; cursor: pointer; background: #fff; }
+  .card.off { opacity: .45; }
+  .card.sel { border-color: #08f; box-shadow: 0 0 0 2px #08f inset; }
+  .card img { width: 70%; background: #eee; min-height: 30px; }
+  .badge { font-size: 11px; background: #fde68a; padding: 2px 6px; border-radius: 4px; }
+  #editor { position: sticky; top: 0; z-index: 2; border: 2px solid #08f; }
+  #editor img { width: 100%; background: #eee; min-height: 40px; }
+  #editor label { display: flex; gap: 8px; align-items: center; font-size: 13px; margin: 4px 0; }
+  #editor input[type=range] { flex: 1; }
+</style>
+</head>
+<body>
+<h1>유튜브 악보 → PDF</h1>
+
+<section>
+  <div class="row">
+    <input id="url" type="text" placeholder="유튜브 URL 을 붙여넣으세요">
+    <button id="loadBtn">불러오기</button>
+    <div id="spin" class="spinner hidden"></div>
+    <span id="status"></span>
+  </div>
+  <div id="err" class="err"></div>
+</section>
+
+<section id="regionSec" class="hidden">
+  <div>악보 영역: 파란 박스의 위·아래 경계를 드래그해 조정하세요.</div>
+  <div id="stage"><img id="frame" alt=""><div id="box"><div class="handle top"></div><div class="handle bottom"></div></div></div>
+  <label class="row">시점 <input id="t" type="range" min="0" step="1" style="flex:1"> <span id="tLabel"></span></label>
+  <div class="row">
+    <label><input id="mask" type="checkbox" checked> 배경 제거</label>
+    <button id="extractBtn">추출</button>
+    <button id="pdfBtn" disabled>PDF 저장</button>
+  </div>
+</section>
+
+<section id="editor" class="hidden">
+  <div class="row"><b id="edTitle"></b> <button id="edClose">닫기</button></div>
+  <img id="edImg" alt="">
+  <label>시작 <input id="edStart" type="range" step="0.25"> <span id="edStartL"></span></label>
+  <label>끝 <input id="edEnd" type="range" step="0.25"> <span id="edEndL"></span></label>
+  <label>분할 시점 <input id="edSplit" type="range" step="0.25"> <span id="edSplitL"></span></label>
+  <div class="row"><button id="splitBtn">이 시점에서 분할</button><button id="mergeBtn">다음 줄과 병합</button></div>
+</section>
+
+<section id="cardSec" class="hidden"><div id="cards"></div></section>
+
+<script>
+const $ = id => document.getElementById(id);
+const REASON = { transition: '전환 구간', empty: '악보 없음', duplicate: '중복' };
+let video = null, region = null, lines = [], sel = -1;
+
+const fmt = s => `${Math.floor(s / 60)}:${(s % 60).toFixed(2).padStart(5, '0')}`;
+const busy = (on, msg = '') => { $('spin').classList.toggle('hidden', !on); $('status').textContent = msg; };
+
+async function api(path, body) {
+  const r = await fetch(path, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body) });
+  if (!r.ok) throw new Error((await r.json().catch(() => ({}))).detail || r.statusText);
+  return r;
+}
+
+function lineUrl(l) {
+  const q = new URLSearchParams({ start: l.start, end: l.end, top: region.top, bottom: region.bottom, mask: $('mask').checked ? 1 : 0 });
+  return `/api/line/${video.id}?${q}`;
+}
+
+// 1. 불러오기
+$('loadBtn').onclick = async () => {
+  $('err').textContent = '';
+  busy(true, '다운로드·분석 중... (처음엔 1~2분 걸릴 수 있음)');
+  try {
+    video = await (await api('/api/load', { url: $('url').value.trim() })).json();
+    region = { ...video.region };
+    lines = []; sel = -1; renderCards(); $('editor').classList.add('hidden'); $('pdfBtn').disabled = true;
+    $('t').max = Math.floor(video.duration);
+    $('t').value = Math.floor(video.duration / 3);
+    showFrame();
+    $('regionSec').classList.remove('hidden');
+    busy(false, `${video.width}x${video.height}, ${fmt(video.duration)}`);
+  } catch (e) { busy(false); $('err').textContent = e.message; }
+};
+
+// 2. 영역 표시와 드래그
+function showFrame() {
+  $('frame').src = `/api/frame/${video.id}?t=${$('t').value}`;
+  $('tLabel').textContent = fmt(+$('t').value);
+  drawBox();
+}
+$('t').oninput = () => $('tLabel').textContent = fmt(+$('t').value);
+$('t').onchange = showFrame;
+
+function drawBox() {
+  $('box').style.top = region.top / video.height * 100 + '%';
+  $('box').style.height = (region.bottom - region.top) / video.height * 100 + '%';
+}
+
+document.querySelectorAll('.handle').forEach(h => h.onpointerdown = e => {
+  e.preventDefault();
+  const edge = h.classList.contains('top') ? 'top' : 'bottom';
+  const move = ev => {
+    const rect = $('frame').getBoundingClientRect();
+    let y = Math.round((ev.clientY - rect.top) / rect.height * video.height / 2) * 2;
+    y = Math.max(0, Math.min(video.height, y));
+    if (edge === 'top') region.top = Math.min(y, region.bottom - 20);
+    else region.bottom = Math.max(y, region.top + 20);
+    drawBox();
+  };
+  const up = () => { removeEventListener('pointermove', move); removeEventListener('pointerup', up); renderCards(); };
+  addEventListener('pointermove', move);
+  addEventListener('pointerup', up);
+});
+
+// 3. 추출과 카드 목록
+$('extractBtn').onclick = async () => {
+  $('err').textContent = '';
+  busy(true, '줄 분할 중...');
+  try {
+    lines = await (await api('/api/extract', { id: video.id, ...region })).json();
+    sel = -1; $('editor').classList.add('hidden');
+    renderCards();
+    $('pdfBtn').disabled = false;
+    busy(false, `${lines.length}개 구간, ${lines.filter(l => l.include).length}줄 선택됨`);
+  } catch (e) { busy(false); $('err').textContent = e.message; }
+};
+
+function renderCards() {
+  $('cardSec').classList.toggle('hidden', !lines.length);
+  $('cards').innerHTML = '';
+  lines.forEach((l, i) => {
+    const c = document.createElement('div');
+    c.className = 'card' + (l.include ? '' : ' off') + (i === sel ? ' sel' : '');
+    c.innerHTML = `<input type="checkbox" ${l.include ? 'checked' : ''}><img loading="lazy" src="${lineUrl(l)}">
+      <div>${i + 1}. ${fmt(l.start)} ~ ${fmt(l.end)}<br>${l.reason ? `<span class="badge">${REASON[l.reason]}</span>` : ''}</div>`;
+    const cb = c.querySelector('input');
+    cb.onclick = e => e.stopPropagation();
+    cb.onchange = () => { l.include = cb.checked; c.classList.toggle('off', !l.include); };
+    c.onclick = () => openEditor(i);
+    $('cards').appendChild(c);
+  });
+}
+
+// 5. 배경 제거 토글 → 썸네일 전체 다시 렌더링
+$('mask').onchange = () => { renderCards(); if (sel >= 0) preview(); };
+
+// 4. 편집 패널
+function openEditor(i) {
+  sel = i;
+  const l = lines[i];
+  const lo = Math.max(0, l.start - 3), hi = Math.min(video.duration, l.end + 3);
+  for (const id of ['edStart', 'edEnd']) { $(id).min = lo; $(id).max = hi; }
+  $('edStart').value = l.start; $('edEnd').value = l.end;
+  $('edSplit').min = l.start; $('edSplit').max = l.end; $('edSplit').value = (l.start + l.end) / 2;
+  $('edTitle').textContent = `${i + 1}번 줄 편집`;
+  $('editor').classList.remove('hidden');
+  updateLabels(); preview(); renderCards();
+}
+
+function updateLabels() {
+  $('edStartL').textContent = fmt(+$('edStart').value);
+  $('edEndL').textContent = fmt(+$('edEnd').value);
+  $('edSplitL').textContent = fmt(+$('edSplit').value);
+}
+
+let timer;
+function onRange() {
+  const l = lines[sel];
+  let s = +$('edStart').value, e = +$('edEnd').value;
+  if (e - s < 0.25) { if (this === $('edStart')) s = e - 0.25; else e = s + 0.25; }
+  l.start = s; l.end = e;
+  $('edStart').value = s; $('edEnd').value = e;
+  $('edSplit').min = s; $('edSplit').max = e;
+  updateLabels();
+  clearTimeout(timer);
+  timer = setTimeout(() => {
+    preview();
+    const card = $('cards').children[sel];
+    card.querySelector('img').src = lineUrl(l);
+    card.querySelector('div').firstChild.textContent = `${sel + 1}. ${fmt(l.start)} ~ ${fmt(l.end)}`;
+  }, 250);
+}
+$('edStart').oninput = onRange;
+$('edEnd').oninput = onRange;
+$('edSplit').oninput = updateLabels;
+
+function preview() { $('edImg').src = lineUrl(lines[sel]); }
+
+$('splitBtn').onclick = () => {
+  const l = lines[sel], t = +$('edSplit').value;
+  if (t <= l.start || t >= l.end) return;
+  lines.splice(sel + 1, 0, { start: t, end: l.end, include: l.include, reason: null });
+  l.end = t;
+  openEditor(sel);
+};
+
+$('mergeBtn').onclick = () => {
+  const next = lines[sel + 1];
+  if (!next) return;
+  lines[sel].end = next.end;
+  lines.splice(sel + 1, 1);
+  openEditor(sel);
+};
+
+$('edClose').onclick = () => { sel = -1; $('editor').classList.add('hidden'); renderCards(); };
+
+// 6. PDF 저장
+$('pdfBtn').onclick = async () => {
+  const chosen = lines.filter(l => l.include).map(({ start, end }) => ({ start, end }));
+  if (!chosen.length) return alert('체크된 줄이 없습니다');
+  busy(true, 'PDF 만드는 중...');
+  try {
+    const blob = await (await api('/api/pdf', { id: video.id, ...region, mask: $('mask').checked, lines: chosen })).blob();
+    const a = document.createElement('a');
+    a.href = URL.createObjectURL(blob);
+    a.download = `${video.id}.pdf`;
+    a.click();
+    busy(false, `${chosen.length}줄 PDF 저장 완료`);
+  } catch (e) { busy(false); $('err').textContent = e.message; }
+};
+</script>
+</body>
+</html>
